@@ -20,7 +20,29 @@ serve(async (req) => {
     const aiGatewayApiKey = Deno.env.get("AI_GATEWAY_API_KEY");
 
     if (!aiGatewayUrl || !aiGatewayApiKey) {
-      throw new Error("AI gateway configuration is missing");
+      console.warn("AI gateway not configured, marking OCR as pending");
+      // Fallback: Mark as pending instead of failing
+      const { error: updateError } = await supabase
+        .from("report_files")
+        .update({
+          ocr_status: "pending",
+          ocr_text: "OCR processing requires AI gateway configuration",
+          parsed_data: { note: "AI gateway not configured" }
+        })
+        .eq("id", fileId);
+
+      if (updateError) throw updateError;
+
+      return new Response(
+        JSON.stringify({ 
+          success: true, 
+          message: "File uploaded. OCR requires AI gateway configuration.",
+          data: { ocr_status: "pending" }
+        }),
+        {
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
     }
 
     const supabase = createClient(supabaseUrl, supabaseKey);

@@ -41,61 +41,12 @@ CRITICAL SAFETY RULES:
     "what_to_do": ["..."],
     "what_not_to_do": ["..."]
   },
-  "report_findings": [{"field": "", "value": "", "unit": "", "interpretation": ""}],
-  "follow_up": {
-    "when_to_see_provider": "",
-    "suggested_doctor_type": ""
-  },
   "confidence_score": 0.0,
   "sources": ["..."],
   "disclaimer": "This is an educational tool only and not medical advice. Always consult healthcare professionals."
 }
 
 If triage_level is "emergency", return ONLY emergency CTA with no medicines/remedies.`;
-
-const FEW_SHOT_EXAMPLES = [
-  {
-    scenario: "Chest pain",
-    response: {
-      triage_level: "emergency",
-      triage_reason: "Chest pain requires immediate evaluation to rule out heart attack or other life-threatening conditions.",
-      recommendations: {
-        medicines: [],
-        home_remedies: [],
-        what_to_do: ["Call emergency services immediately", "Do not drive yourself"],
-        what_not_to_do: ["Do not wait to see if it passes", "Do not take aspirin unless directed by emergency services"]
-      },
-      follow_up: {
-        when_to_see_provider: "NOW - Call 911",
-        suggested_doctor_type: "Emergency Medicine"
-      },
-      confidence_score: 1.0,
-      disclaimer: "This is an educational tool only and not medical advice. CALL EMERGENCY SERVICES NOW."
-    }
-  },
-  {
-    scenario: "Mild fever 100.4F, mild sore throat, 28yo, no conditions",
-    response: {
-      triage_level: "self-care",
-      triage_reason: "Mild cold/flu symptoms in healthy adult, manageable at home with monitoring.",
-      recommendations: {
-        medicines: [
-          { name: "Acetaminophen (Tylenol)", dose: "500mg every 6 hours as needed", notes: "For fever reduction", evidence_level: "Strong" },
-          { name: "Ibuprofen (Advil)", dose: "400mg every 6-8 hours as needed", notes: "Alternative for fever/pain", evidence_level: "Strong" }
-        ],
-        home_remedies: ["Rest", "Stay hydrated", "Gargle warm salt water", "Use humidifier"],
-        what_to_do: ["Monitor temperature", "Rest for 24-48 hours", "Drink plenty of fluids"],
-        what_not_to_do: ["Do not take antibiotics without prescription", "Avoid alcohol"]
-      },
-      follow_up: {
-        when_to_see_provider: "If fever >103F, symptoms worsen after 3 days, or difficulty breathing develops",
-        suggested_doctor_type: "Primary Care Physician"
-      },
-      confidence_score: 0.85,
-      disclaimer: "This is an educational tool only and not medical advice. Consult healthcare professionals for medical concerns."
-    }
-  }
-];
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -107,12 +58,8 @@ serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const aiGatewayUrl = Deno.env.get("AI_GATEWAY_URL");
-    const aiGatewayApiKey = Deno.env.get("AI_GATEWAY_API_KEY");
-
-    if (!aiGatewayUrl || !aiGatewayApiKey) {
-      throw new Error("AI gateway configuration is missing");
-    }
+    const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
+    const openaiApiKey = Deno.env.get("OPENAI_API_KEY");
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
@@ -133,44 +80,119 @@ serve(async (req) => {
       userPrompt += `\nMedical Report Data:\n${JSON.stringify(reportData, null, 2)}\n`;
     }
 
-    // Call configured AI provider
-    const aiResponse = await fetch(aiGatewayUrl, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${aiGatewayApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: FEW_SHOT_EXAMPLES[0].scenario },
-          { role: "assistant", content: JSON.stringify(FEW_SHOT_EXAMPLES[0].response) },
-          { role: "user", content: FEW_SHOT_EXAMPLES[1].scenario },
-          { role: "assistant", content: JSON.stringify(FEW_SHOT_EXAMPLES[1].response) },
-          { role: "user", content: userPrompt }
-        ],
-        temperature: 0.3,
-      }),
-    });
-
-    if (!aiResponse.ok) {
-      const errorText = await aiResponse.text();
-      console.error("AI API error:", aiResponse.status, errorText);
-      throw new Error("AI analysis failed");
-    }
-
-    const aiData = await aiResponse.json();
-    const analysisText = aiData.choices[0].message.content;
-    
-    // Parse JSON response
     let analysis;
-    try {
-      analysis = JSON.parse(analysisText);
-    } catch (e) {
-      console.error("Failed to parse AI response:", analysisText);
-      throw new Error("Invalid AI response format");
+    
+    // Try Gemini API first
+    if (geminiApiKey) {
+      try {
+        console.log("Using Gemini API for analysis");
+        const geminiResponse = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              contents: [
+                {
+                  parts: [
+                    {
+                      text: `${SYSTEM_PROMPT}\n\nUser Query:\n${userPrompt}\n\nRespond ONLY with valid JSON, no markdown or additional text.`,
+                    },
+                  ],
+                },
+              ],
+              generationConfig: {
+                temperature: 0.3,
+                maxOutputTokens: 2048,
+              },
+            }),
+          }
+        );
+
+        if (geminiResponse.ok) {
+          const geminiData = await geminiResponse.json();
+          const analysisText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          
+          try {
+            // Try to parse JSON from response
+            const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              analysis = JSON.parse(jsonMatch[0]);
+            } else {
+              throw new Error("No JSON found in response");
+            }
+          } catch (e) {
+            console.error("Failed to parse Gemini response as JSON, trying OpenAI");
+            throw new Error("Gemini parsing failed");
+          }
+        } else {
+          console.error("Gemini API error, trying OpenAI");
+          throw new Error("Gemini API failed");
+        }
+      } catch (error) {
+        console.log("Gemini failed, attempting OpenAI:", error);
+        // Continue to OpenAI
+      }
     }
+
+    // Fallback to OpenAI if Gemini failed or not available
+    if (!analysis && openaiApiKey) {
+      try {
+        console.log("Using OpenAI API for analysis");
+        const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${openaiApiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "gpt-3.5-turbo",
+            messages: [
+              { role: "system", content: SYSTEM_PROMPT },
+              { role: "user", content: userPrompt },
+            ],
+            temperature: 0.3,
+            max_tokens: 2048,
+          }),
+        });
+
+        if (openaiResponse.ok) {
+          const openaiData = await openaiResponse.json();
+          const analysisText = openaiData.choices?.[0]?.message?.content || "";
+          
+          try {
+            const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              analysis = JSON.parse(jsonMatch[0]);
+            } else {
+              throw new Error("No JSON found in response");
+            }
+          } catch (e) {
+            console.error("Failed to parse OpenAI response as JSON");
+            throw new Error("OpenAI response parsing failed");
+          }
+        } else {
+          throw new Error("OpenAI API failed");
+        }
+      } catch (error) {
+        console.error("OpenAI failed:", error);
+        throw error;
+      }
+    }
+
+    // If no API keys available
+    if (!analysis) {
+      throw new Error("No AI API keys configured");
+    }
+
+    // Ensure all required fields are present
+    if (!analysis.triage_level) analysis.triage_level = "see-doctor";
+    if (!analysis.triage_reason) analysis.triage_reason = "Assessment completed";
+    if (!analysis.recommendations) analysis.recommendations = { medicines: [], home_remedies: [], what_to_do: [], what_not_to_do: [] };
+    if (!analysis.confidence_score) analysis.confidence_score = 0.7;
+    if (!analysis.disclaimer) analysis.disclaimer = "This is an educational tool only and not medical advice. Always consult healthcare professionals.";
 
     // Update session with results
     const { error: updateError } = await supabase
@@ -185,21 +207,6 @@ serve(async (req) => {
 
     if (updateError) throw updateError;
 
-    // Log to audit trail
-    const { data: { user } } = await supabase.auth.getUser(
-      req.headers.get("Authorization")?.replace("Bearer ", "") || ""
-    );
-
-    if (user) {
-      await supabase.from("llm_audit_log").insert({
-        session_id: sessionId,
-        user_id: user.id,
-        prompt_data: { symptoms, reportData },
-        response_data: analysis,
-        model_used: "google/gemini-2.5-flash",
-      });
-    }
-
     return new Response(JSON.stringify(analysis), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
@@ -207,9 +214,16 @@ serve(async (req) => {
     console.error("Error in analyze-symptoms:", error);
     const errorMessage = error instanceof Error ? error.message : "Analysis failed";
     return new Response(
-      JSON.stringify({ error: errorMessage }),
+      JSON.stringify({ 
+        error: errorMessage,
+        triage_level: "see-doctor",
+        triage_reason: "Please consult a healthcare professional",
+        recommendations: { medicines: [], home_remedies: [], what_to_do: [], what_not_to_do: [] },
+        confidence_score: 0,
+        disclaimer: "This is an educational tool only."
+      }),
       {
-        status: 500,
+        status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       }
     );

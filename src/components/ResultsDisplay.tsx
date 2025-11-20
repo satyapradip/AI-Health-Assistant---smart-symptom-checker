@@ -6,47 +6,108 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { AlertCircle, AlertTriangle, Info, CheckCircle, PhoneCall } from "lucide-react";
 
+interface SessionData {
+  id: string;
+  created_at: string;
+  triage_level: string;
+  triage_reason: string;
+  confidence_score: number;
+  recommendations: {
+    medicines: Medicine[];
+    home_remedies: string[];
+    what_to_do: string[];
+    what_not_to_do: string[];
+    follow_up?: Record<string, unknown>;
+    disclaimer?: string;
+  };
+}
+
+interface Medicine {
+  name: string;
+  dose?: string;
+  notes?: string;
+}
+
 interface ResultsDisplayProps {
   sessionId: string;
   onNewAssessment: () => void;
 }
 
 const ResultsDisplay = ({ sessionId, onNewAssessment }: ResultsDisplayProps) => {
-  const [session, setSession] = useState<any>(null);
+  const [session, setSession] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSession = async () => {
+    try {
+      const { data, error: fetchError } = await supabase
+        .from("symptom_sessions")
+        .select("*")
+        .eq("id", sessionId)
+        .single();
+
+      if (fetchError) {
+        console.error("❌ Error fetching session:", fetchError);
+        setError(fetchError.message);
+        setLoading(false);
+        return;
+      }
+
+      if (!data) {
+        console.warn("⚠️ No session data found");
+        setError("Session not found");
+        setLoading(false);
+        return;
+      }
+
+      // Check if recommendations are available
+      if (data.triage_level && data.recommendations) {
+        const recs = data.recommendations as Record<string, unknown>;
+        console.log("✅ Session data with recommendations found:", {
+          triage_level: data.triage_level,
+          confidence_score: data.confidence_score,
+          recommendations: {
+            medicines: Array.isArray(recs.medicines) ? recs.medicines.length : 0,
+            home_remedies: Array.isArray(recs.home_remedies) ? recs.home_remedies.length : 0,
+            what_to_do: Array.isArray(recs.what_to_do) ? recs.what_to_do.length : 0,
+            what_not_to_do: Array.isArray(recs.what_not_to_do) ? recs.what_not_to_do.length : 0,
+          },
+        });
+      } else {
+        console.log("⏳ Session data not yet ready - still waiting for AI analysis");
+      }
+
+      setSession(data as unknown as SessionData);
+      setLoading(false);
+    } catch (err) {
+      console.error("❌ Fetch session error:", err);
+      setError(err instanceof Error ? err.message : "Failed to fetch session");
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     fetchSession();
+    // Poll for updates every 1 second to catch real-time changes
+    const interval = setInterval(fetchSession, 1000);
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
-
-  const fetchSession = async () => {
-    const { data, error } = await supabase
-      .from("symptom_sessions")
-      .select("*")
-      .eq("id", sessionId)
-      .single();
-
-    if (error) {
-      console.error("Error fetching session:", error);
-    } else {
-      setSession(data);
-    }
-    setLoading(false);
-  };
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      <div className="flex flex-col items-center justify-center py-12 gap-4">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+        <p className="text-foreground/70">Analyzing your symptoms...</p>
       </div>
     );
   }
 
-  if (!session) {
+  if (error || !session) {
     return (
       <Alert variant="destructive">
         <AlertCircle className="h-4 w-4" />
-        <AlertDescription>Failed to load session results</AlertDescription>
+        <AlertDescription>{error || "Failed to load session results. Please try again."}</AlertDescription>
       </Alert>
     );
   }
@@ -80,9 +141,23 @@ const ResultsDisplay = ({ sessionId, onNewAssessment }: ResultsDisplayProps) => 
     }
   };
 
-  const recommendations = session.recommendations || {};
+  const recommendations = (session.recommendations as unknown as {
+    medicines?: Medicine[];
+    home_remedies?: string[];
+    what_to_do?: string[];
+    what_not_to_do?: string[];
+    follow_up?: Record<string, unknown>;
+    disclaimer?: string;
+  }) || {};
   const confidenceScore = typeof session.confidence_score === "number" ? session.confidence_score : null;
   const createdAt = new Date(session.created_at).toLocaleString();
+  
+  console.log("Rendering results with:", {
+    triage_level: session.triage_level,
+    triage_reason: session.triage_reason,
+    recommendations,
+    confidenceScore,
+  });
   const triageMeta: Record<string, { gradient: string; accent: string; headline: string }> = {
     emergency: {
       gradient: "from-destructive/30 via-destructive/10 to-transparent",
@@ -110,7 +185,14 @@ const ResultsDisplay = ({ sessionId, onNewAssessment }: ResultsDisplayProps) => 
     accent: "text-primary",
     headline: "Assessment ready",
   };
-  const showRecommendations = session.triage_level !== "emergency";
+  
+  // Always show recommendations (even for emergency, show what NOT to do)
+  const hasRecommendations = recommendations && (
+    (Array.isArray(recommendations.medicines) && recommendations.medicines.length > 0) ||
+    (Array.isArray(recommendations.home_remedies) && recommendations.home_remedies.length > 0) ||
+    (Array.isArray(recommendations.what_to_do) && recommendations.what_to_do.length > 0) ||
+    (Array.isArray(recommendations.what_not_to_do) && recommendations.what_not_to_do.length > 0)
+  );
 
   return (
     <div className="space-y-10">
@@ -167,39 +249,35 @@ const ResultsDisplay = ({ sessionId, onNewAssessment }: ResultsDisplayProps) => 
             </div>
           )}
 
-          {showRecommendations && (
-            <div className="grid gap-6 lg:grid-cols-2">
-              {recommendations.medicines && recommendations.medicines.length > 0 && (
-                <div className="rounded-3xl border border-white/15 bg-white/5 p-5">
-                  <h3 className="font-display text-lg">Over-the-Counter Suggestions</h3>
-                  <div className="mt-4 space-y-3">
-                    {recommendations.medicines.map((med: any, idx: number) => (
-                      <div key={idx} className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                        <p className="font-semibold">{med.name}</p>
-                        {med.dose && <p className="text-sm text-foreground/70">Dose: {med.dose}</p>}
-                        {med.notes && <p className="text-xs text-foreground/60">{med.notes}</p>}
-                      </div>
-                    ))}
+          {recommendations.medicines && recommendations.medicines.length > 0 && (
+            <div className="rounded-3xl border border-white/15 bg-white/5 p-5">
+              <h3 className="font-display text-lg">Over-the-Counter Suggestions</h3>
+              <div className="mt-4 space-y-3">
+                {recommendations.medicines.map((med: Medicine, idx: number) => (
+                  <div key={idx} className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                    <p className="font-semibold">{med.name}</p>
+                    {med.dose && <p className="text-sm text-foreground/70">Dose: {med.dose}</p>}
+                    {med.notes && <p className="text-xs text-foreground/60">{med.notes}</p>}
                   </div>
-                </div>
-              )}
-
-              {recommendations.home_remedies && recommendations.home_remedies.length > 0 && (
-                <div className="rounded-3xl border border-white/15 bg-white/5 p-5">
-                  <h3 className="font-display text-lg">Home Care Rituals</h3>
-                  <ul className="mt-4 space-y-2 text-sm text-foreground/80">
-                    {recommendations.home_remedies.map((remedy: string, idx: number) => (
-                      <li key={idx} className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                        {remedy}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+                ))}
+              </div>
             </div>
           )}
 
-          {showRecommendations && (
+          {recommendations.home_remedies && recommendations.home_remedies.length > 0 && (
+            <div className="rounded-3xl border border-white/15 bg-white/5 p-5">
+              <h3 className="font-display text-lg">Home Care Rituals</h3>
+              <ul className="mt-4 space-y-2 text-sm text-foreground/80">
+                {recommendations.home_remedies.map((remedy: string, idx: number) => (
+                  <li key={idx} className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                    {remedy}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {hasRecommendations && (
             <div className="grid gap-6 lg:grid-cols-2">
               {recommendations.what_to_do && recommendations.what_to_do.length > 0 && (
                 <div className="rounded-3xl border border-success/30 bg-success/5 p-5">
@@ -232,14 +310,14 @@ const ResultsDisplay = ({ sessionId, onNewAssessment }: ResultsDisplayProps) => 
           {recommendations.follow_up && (
             <div className="rounded-3xl border border-white/15 bg-white/5 p-5">
               <h3 className="font-display text-lg">Follow-Up Guidance</h3>
-              {recommendations.follow_up.when_to_see_provider && (
+              {(recommendations.follow_up as Record<string, unknown>).when_to_see_provider && (
                 <p className="mt-2 text-sm text-foreground/80">
-                  <strong>When to see a provider:</strong> {recommendations.follow_up.when_to_see_provider}
+                  <strong>When to see a provider:</strong> {(recommendations.follow_up as Record<string, unknown>).when_to_see_provider as React.ReactNode}
                 </p>
               )}
-              {recommendations.follow_up.suggested_doctor_type && (
+              {(recommendations.follow_up as Record<string, unknown>).suggested_doctor_type && (
                 <p className="mt-2 text-sm text-foreground/80">
-                  <strong>Suggested provider:</strong> {recommendations.follow_up.suggested_doctor_type}
+                  <strong>Suggested provider:</strong> {(recommendations.follow_up as Record<string, unknown>).suggested_doctor_type as React.ReactNode}
                 </p>
               )}
             </div>
