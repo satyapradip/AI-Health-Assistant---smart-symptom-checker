@@ -1,0 +1,7 @@
+project_id = "klarjexidsdfuwizlvzk"
+
+[functions.analyze-symptoms]
+verify_jwt = true
+
+[functions.process-ocr]
+verify_jwt = false
