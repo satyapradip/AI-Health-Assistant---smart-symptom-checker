@@ -200,7 +200,3 @@ The developers assume **NO liability** for:
 **Making AI-powered healthcare available to everyone, everywhere.**
 
 ---
-
-**[⬆ Back to Top](#-ai-health-assistant---smart-symptom-checker)**
-
-</div>
